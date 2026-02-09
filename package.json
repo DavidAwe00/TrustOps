@@ -1,0 +1,24 @@
+{
+  "name": "trustops",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm -w @trustops/web run dev",
+    "build": "npm -ws run build",
+    "lint": "npm -ws run lint",
+    "test": "npm -w @trustops/web run test",
+    "test:ui": "npm -w @trustops/web run test:ui",
+    "db:generate": "npm -w @trustops/db run db:generate",
+    "db:migrate": "npm -w @trustops/db run db:migrate",
+    "db:seed": "npm -w @trustops/db run db:seed",
+    "db:studio": "npm -w @trustops/db run db:studio"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": ""
+}

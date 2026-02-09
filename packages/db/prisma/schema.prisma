@@ -1,0 +1,477 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum MembershipRole {
+  OWNER
+  ADMIN
+  MEMBER
+  AUDITOR
+}
+
+enum IntegrationProvider {
+  GITHUB
+  AWS
+}
+
+enum IntegrationStatus {
+  CONNECTED
+  DISCONNECTED
+  ERROR
+}
+
+enum EvidenceSource {
+  MANUAL
+  GITHUB
+  AWS
+  AI
+}
+
+enum EvidenceReviewStatus {
+  NEEDS_REVIEW
+  APPROVED
+  REJECTED
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum TaskStatus {
+  OPEN
+  IN_PROGRESS
+  DONE
+  CANCELLED
+}
+
+enum TaskRunStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+enum TrustCenterPageStatus {
+  DRAFT
+  PUBLISHED
+}
+
+enum AnswerStatus {
+  DRAFT
+  NEEDS_REVIEW
+  APPROVED
+}
+
+enum ApprovalTargetType {
+  EVIDENCE_ITEM
+  EVIDENCE_FILE
+  ANSWER
+  TRUST_CENTER_PAGE
+}
+
+model User {
+  id           String    @id @default(cuid())
+  name         String?
+  email        String?   @unique
+  emailVerified DateTime?
+  image        String?
+
+  defaultOrgId String?
+  defaultOrg   Org?      @relation("UserDefaultOrg", fields: [defaultOrgId], references: [id])
+
+  accounts     Account[]
+  sessions     Session[]
+  memberships  Membership[]
+  auditLogs    AuditLog[] @relation("AuditActor")
+
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+// Auth.js / NextAuth tables
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+model Org {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+
+  defaultUsers User[] @relation("UserDefaultOrg")
+  memberships Membership[]
+  integrations Integration[]
+  evidenceItems EvidenceItem[]
+  evidenceFiles EvidenceFile[]
+  approvals     Approval[]
+  controlEvidence ControlEvidence[]
+  tasks         Task[]
+  taskRuns      TaskRun[]
+  auditLogs     AuditLog[]
+  trustCenterPages TrustCenterPage[]
+  questionnaires Questionnaire[]
+  answers        Answer[]
+  exports        AuditExport[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Membership {
+  id     String         @id @default(cuid())
+  orgId  String
+  userId String
+  role   MembershipRole @default(MEMBER)
+
+  org  Org  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([orgId, userId])
+  @@index([userId])
+  @@index([orgId])
+}
+
+model Integration {
+  id        String              @id @default(cuid())
+  orgId     String
+  provider  IntegrationProvider
+  name      String
+  status    IntegrationStatus   @default(DISCONNECTED)
+  config    Json                @default("{}")
+  lastSyncAt DateTime?
+  lastError  String?
+
+  org Org @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  evidenceItems EvidenceItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orgId])
+  @@index([provider])
+}
+
+model Framework {
+  id          String  @id @default(cuid())
+  key         String  @unique
+  name        String
+  version     String?
+  description String?
+
+  controls Control[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Control {
+  id          String @id @default(cuid())
+  frameworkId String
+  code        String
+  title       String
+  description String?
+  category    String?
+  guidance    String?
+
+  framework Framework @relation(fields: [frameworkId], references: [id], onDelete: Cascade)
+  mappings  ControlEvidence[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([frameworkId, code])
+  @@index([frameworkId])
+}
+
+model EvidenceItem {
+  id            String         @id @default(cuid())
+  orgId         String
+  integrationId String?
+  source        EvidenceSource
+  externalId    String?
+  title         String
+  description   String?
+  rawJson       Json?
+  summary       String?
+  collectedAt   DateTime       @default(now())
+  expiresAt     DateTime?
+  reviewStatus  EvidenceReviewStatus @default(NEEDS_REVIEW)
+
+  org         Org          @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  integration Integration? @relation(fields: [integrationId], references: [id], onDelete: SetNull)
+
+  files       EvidenceFile[]
+  mappings    ControlEvidence[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orgId])
+  @@index([integrationId])
+}
+
+model EvidenceFile {
+  id           String   @id @default(cuid())
+  orgId        String
+  evidenceItemId String?
+
+  filename     String
+  storageKey   String
+  mimeType     String?
+  sizeBytes    Int?
+  sha256       String?
+  summary      String?
+  reviewStatus EvidenceReviewStatus @default(NEEDS_REVIEW)
+
+  org         Org          @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  evidenceItem EvidenceItem? @relation(fields: [evidenceItemId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orgId])
+  @@index([evidenceItemId])
+}
+
+model ControlEvidence {
+  id           String @id @default(cuid())
+  orgId        String
+  controlId    String
+  evidenceItemId String
+
+  org         Org        @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  control     Control    @relation(fields: [controlId], references: [id], onDelete: Cascade)
+  evidenceItem EvidenceItem @relation(fields: [evidenceItemId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([orgId, controlId, evidenceItemId])
+  @@index([orgId])
+  @@index([controlId])
+  @@index([evidenceItemId])
+}
+
+model Approval {
+  id            String         @id @default(cuid())
+  orgId         String
+  targetType    ApprovalTargetType
+  targetId      String
+  status        ApprovalStatus @default(PENDING)
+  requestedByUserId String?
+  decidedByUserId   String?
+  reason        String?
+
+  org Org @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  decidedAt DateTime?
+
+  @@index([orgId])
+  @@index([targetType, targetId])
+}
+
+model Task {
+  id          String     @id @default(cuid())
+  orgId       String
+  title       String
+  description String?
+  status      TaskStatus @default(OPEN)
+  dueAt       DateTime?
+  assignedToUserId String?
+  createdByUserId  String?
+
+  org Org @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  runs TaskRun[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orgId])
+  @@index([status])
+}
+
+model TaskRun {
+  id        String       @id @default(cuid())
+  orgId     String
+  taskId    String?
+  jobType   String
+  status    TaskRunStatus @default(QUEUED)
+  startedAt DateTime?
+  finishedAt DateTime?
+  logs      Json?
+
+  org  Org  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  task Task? @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  @@index([orgId])
+  @@index([status])
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  orgId       String
+  actorUserId String?
+  action      String
+  targetType  String?
+  targetId    String?
+  ip          String?
+  userAgent   String?
+  metadata    Json?
+
+  org   Org   @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  actor User? @relation("AuditActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  @@index([orgId])
+  @@index([actorUserId])
+  @@index([action])
+}
+
+model TrustCenterPage {
+  id        String              @id @default(cuid())
+  orgId     String
+  slug      String
+  title     String
+  contentMd String
+  status    TrustCenterPageStatus @default(DRAFT)
+  publishedAt DateTime?
+
+  org Org @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([orgId, slug])
+  @@index([orgId])
+}
+
+model Questionnaire {
+  id          String @id @default(cuid())
+  orgId       String
+  name        String
+  description String?
+
+  org Org @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  questions Question[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orgId])
+}
+
+model Question {
+  id              String @id @default(cuid())
+  questionnaireId String
+  prompt          String
+  order           Int    @default(0)
+  metadata        Json?
+
+  questionnaire Questionnaire @relation(fields: [questionnaireId], references: [id], onDelete: Cascade)
+  answers Answer[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([questionnaireId])
+}
+
+model Answer {
+  id         String      @id @default(cuid())
+  orgId      String
+  questionId String
+  contentMd  String
+  status     AnswerStatus @default(DRAFT)
+  createdByUserId String?
+
+  org      Org      @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  question Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  sources  AnswerSource[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orgId])
+  @@index([questionId])
+  @@index([status])
+}
+
+model AnswerSource {
+  id           String @id @default(cuid())
+  answerId     String
+  evidenceItemId String?
+  evidenceFileId String?
+  trustCenterPageId String?
+  citationText String?
+  quote        String?
+  location     String?
+
+  answer Answer @relation(fields: [answerId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@index([answerId])
+}
+
+model AuditExport {
+  id        String   @id @default(cuid())
+  orgId     String
+  status    String
+  storageKey String?
+  startedAt DateTime?
+  finishedAt DateTime?
+  error     String?
+
+  org Org @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@index([orgId])
+}
+
+
