@@ -93,6 +93,13 @@ export function validateEnv(): { valid: boolean; errors: string[]; warnings: str
  * Call this at app startup (e.g., in instrumentation.ts or next.config).
  */
 export function assertEnv(): void {
+  // Skip validation during Next.js build phase
+  // We only want runtime validation, not build-time validation
+  if (process.env.NEXT_PHASE === "phase-production-build") {
+    console.log("[TrustOps] Skipping env validation during build phase");
+    return;
+  }
+
   const { valid, errors, warnings } = validateEnv();
 
   for (const warning of warnings) {
@@ -107,12 +114,12 @@ export function assertEnv(): void {
       "See .env.example for required variables.",
     ].join("\n");
 
-    // In production, throw immediately
-    if (process.env.NODE_ENV === "production") {
+    // In production runtime, throw immediately
+    if (process.env.NODE_ENV === "production" && !isDemo()) {
       throw new Error(message);
     }
 
-    // In development, log loudly but don't crash
+    // In development or demo mode, log loudly but don't crash
     console.error(message);
   }
 }
