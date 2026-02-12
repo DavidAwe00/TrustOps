@@ -28,11 +28,12 @@ export async function getEvidenceItems(orgId: string): Promise<EvidenceItem[]> {
   });
 
   type ItemType = typeof items[number];
+  type MappingType = ItemType["mappings"][number];
   return items.map((item: ItemType) => ({
     ...item,
     source: item.source as "MANUAL" | "GITHUB" | "AWS" | "AI",
     reviewStatus: item.reviewStatus as "NEEDS_REVIEW" | "APPROVED" | "REJECTED",
-    controlIds: item.mappings.map((m) => m.controlId),
+    controlIds: item.mappings.map((m: MappingType) => m.controlId),
   }));
 }
 
@@ -52,11 +53,12 @@ export async function getEvidenceItem(
 
   if (!item) return null;
 
+  type MappingType = typeof item.mappings[number];
   return {
     ...item,
     source: item.source as "MANUAL" | "GITHUB" | "AWS" | "AI",
     reviewStatus: item.reviewStatus as "NEEDS_REVIEW" | "APPROVED" | "REJECTED",
-    controlIds: item.mappings.map((m) => m.controlId),
+    controlIds: item.mappings.map((m: MappingType) => m.controlId),
   };
 }
 
@@ -99,11 +101,12 @@ export async function createEvidenceItem(
     },
   });
 
+  type MappingType = typeof item.mappings[number];
   return {
     ...item,
     source: item.source as "MANUAL" | "GITHUB" | "AWS" | "AI",
     reviewStatus: item.reviewStatus as "NEEDS_REVIEW" | "APPROVED" | "REJECTED",
-    controlIds: item.mappings.map((m) => m.controlId),
+    controlIds: item.mappings.map((m: MappingType) => m.controlId),
   };
 }
 
@@ -148,11 +151,12 @@ export async function updateEvidenceItem(
     },
   });
 
+  type MappingType = typeof item.mappings[number];
   return {
     ...item,
     source: item.source as "MANUAL" | "GITHUB" | "AWS" | "AI",
     reviewStatus: item.reviewStatus as "NEEDS_REVIEW" | "APPROVED" | "REJECTED",
-    controlIds: item.mappings.map((m) => m.controlId),
+    controlIds: item.mappings.map((m: MappingType) => m.controlId),
   };
 }
 
