@@ -77,9 +77,10 @@ export async function POST(request: NextRequest) {
         },
       });
 
+      type ItemType = typeof items[number];
       expiringEvidence = items
-        .filter((item) => item.org.memberships[0]?.user?.email)
-        .map((item) => ({
+        .filter((item: ItemType) => item.org.memberships[0]?.user?.email)
+        .map((item: ItemType) => ({
           id: item.id,
           title: item.title,
           expiresAt: item.expiresAt!,
