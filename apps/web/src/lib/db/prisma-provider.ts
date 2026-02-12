@@ -27,7 +27,8 @@ export async function getEvidenceItems(orgId: string): Promise<EvidenceItem[]> {
     orderBy: { createdAt: "desc" },
   });
 
-  return items.map((item) => ({
+  type ItemType = typeof items[number];
+  return items.map((item: ItemType) => ({
     ...item,
     source: item.source as "MANUAL" | "GITHUB" | "AWS" | "AI",
     reviewStatus: item.reviewStatus as "NEEDS_REVIEW" | "APPROVED" | "REJECTED",
@@ -220,7 +221,8 @@ export async function getAuditLogs(orgId: string, limit = 50): Promise<AuditLogE
     take: limit,
   });
 
-  return logs.map((log) => ({
+  type LogType = typeof logs[number];
+  return logs.map((log: LogType) => ({
     ...log,
     metadata: log.metadata as Record<string, unknown> | null,
   }));
@@ -264,7 +266,8 @@ export async function getIntegrations(orgId: string): Promise<Integration[]> {
     orderBy: { name: "asc" },
   });
 
-  return integrations.map((i) => ({
+  type IntegrationType = typeof integrations[number];
+  return integrations.map((i: IntegrationType) => ({
     ...i,
     provider: i.provider as "GITHUB" | "AWS",
     status: i.status as "CONNECTED" | "DISCONNECTED" | "ERROR",
@@ -367,7 +370,8 @@ export async function getCoverageStats(orgId: string) {
 
   // Calculate framework stats
   const frameworks = await prisma.framework.findMany();
-  const frameworkStats = frameworks.map((f) => {
+  type FrameworkType = typeof frameworks[number];
+  const frameworkStats = frameworks.map((f: FrameworkType) => {
     const frameworkControls = controls.filter((c) => c.frameworkId === f.id);
     const coveredFrameworkControls = frameworkControls.filter((c) =>
       coveredControlIds.has(c.id)
