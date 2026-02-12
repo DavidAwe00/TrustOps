@@ -1,11 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getExports } from "@/lib/exports-store";
 import { generateAuditPacket } from "@/lib/export-generator";
+import { requireAuth, Errors } from "@/lib/api-utils";
+import { CreateExportSchema, parseBody } from "@/lib/validations";
+import { rateLimit } from "@/lib/rate-limit";
+import { logger } from "@/lib/logger";
 
 /**
  * GET /api/exports - List all exports
  */
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const limited = rateLimit(request, "standard");
+  if (limited) return limited;
+
+  const ctx = await requireAuth();
+  if (ctx instanceof NextResponse) return ctx;
+
   const exports = getExports();
   return NextResponse.json({ exports });
 }
@@ -14,26 +24,29 @@ export async function GET() {
  * POST /api/exports - Generate a new export
  */
 export async function POST(request: NextRequest) {
+  const limited = rateLimit(request, "ai");
+  if (limited) return limited;
+
+  const ctx = await requireAuth();
+  if (ctx instanceof NextResponse) return ctx;
+
   try {
     const body = await request.json();
-    const { frameworkKey } = body;
 
-    if (!frameworkKey) {
-      return NextResponse.json(
-        { error: "Framework key is required" },
-        { status: 400 }
-      );
+    const parsed = parseBody(CreateExportSchema, body);
+    if (!parsed.success) {
+      return Errors.validationError(parsed.errors);
     }
 
-    const exportRecord = await generateAuditPacket(frameworkKey);
+    const exportRecord = await generateAuditPacket(parsed.data.frameworkKey);
+
+    logger.info("Export generated", {
+      orgId: ctx.orgId,
+      frameworkKey: parsed.data.frameworkKey,
+    });
 
     return NextResponse.json({ export: exportRecord });
   } catch (error) {
-    console.error("Export error:", error);
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Failed to generate export" },
-      { status: 500 }
-    );
+    return Errors.internal("Failed to generate export", error);
   }
 }
-

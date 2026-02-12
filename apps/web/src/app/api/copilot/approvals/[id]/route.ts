@@ -74,11 +74,8 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       approval: getApproval(id),
     });
   } catch (error) {
-    console.error("Approval error:", error);
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Failed to process approval" },
-      { status: 500 }
-    );
+    const { Errors } = await import("@/lib/api-utils");
+    return Errors.internal("Failed to process approval", error);
   }
 }
 

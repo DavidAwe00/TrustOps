@@ -10,16 +10,23 @@ import {
   answerQuestion,
 } from "@/lib/ai/service";
 import { createAuditLog } from "@/lib/db";
+import { requireAuth, Errors } from "@/lib/api-utils";
+import { CopilotChatSchema, parseBody } from "@/lib/validations";
+import { rateLimit } from "@/lib/rate-limit";
+import { logger } from "@/lib/logger";
 import type { ChatMessage } from "@/lib/ai/types";
-
-const ORG_ID = "demo-org-1";
-const USER_ID = "demo-user-1";
 
 /**
  * GET /api/copilot/chat - Get chat session
  */
-export async function GET() {
-  const session = getOrCreateSession(ORG_ID, USER_ID);
+export async function GET(request: NextRequest) {
+  const limited = rateLimit(request, "standard");
+  if (limited) return limited;
+
+  const ctx = await requireAuth();
+  if (ctx instanceof NextResponse) return ctx;
+
+  const session = getOrCreateSession(ctx.orgId, ctx.userId);
   return NextResponse.json({ session });
 }
 
@@ -27,18 +34,22 @@ export async function GET() {
  * POST /api/copilot/chat - Send message and get response
  */
 export async function POST(request: NextRequest) {
+  const limited = rateLimit(request, "ai");
+  if (limited) return limited;
+
+  const ctx = await requireAuth();
+  if (ctx instanceof NextResponse) return ctx;
+
   try {
     const body = await request.json();
-    const { message, action } = body;
 
-    if (!message && !action) {
-      return NextResponse.json(
-        { error: "Message or action is required" },
-        { status: 400 }
-      );
+    const parsed = parseBody(CopilotChatSchema, body);
+    if (!parsed.success) {
+      return Errors.validationError(parsed.errors);
     }
 
-    const session = getOrCreateSession(ORG_ID, USER_ID);
+    const { message, action } = parsed.data;
+    const session = getOrCreateSession(ctx.orgId, ctx.userId);
 
     // Add user message
     if (message) {
@@ -58,7 +69,7 @@ export async function POST(request: NextRequest) {
           const result = await performGapAnalysis(frameworkKey);
           addPendingApproval("gap_analysis", result);
 
-          await createAuditLog(ORG_ID, {
+          await createAuditLog(ctx.orgId, {
             action: "ai.gap_analysis",
             targetType: "gap_analysis",
             targetId: result.id,
@@ -85,7 +96,7 @@ export async function POST(request: NextRequest) {
           const result = await generatePolicyDraft(policyType, frameworkKey);
           addPendingApproval("policy_draft", result);
 
-          await createAuditLog(ORG_ID, {
+          await createAuditLog(ctx.orgId, {
             action: "ai.policy_draft",
             targetType: "policy_draft",
             targetId: result.id,
@@ -104,10 +115,13 @@ export async function POST(request: NextRequest) {
 
         case "questionnaire_answer": {
           const question = action.question || message;
+          if (!question) {
+            return Errors.badRequest("Question is required for questionnaire answers");
+          }
           const result = await answerQuestion(question);
           addPendingApproval("questionnaire_answer", result);
 
-          await createAuditLog(ORG_ID, {
+          await createAuditLog(ctx.orgId, {
             action: "ai.questionnaire_answer",
             targetType: "questionnaire_answer",
             targetId: result.id,
@@ -130,7 +144,7 @@ export async function POST(request: NextRequest) {
             content: "I don't recognize that action. Try asking about gap analysis, policy drafting, or questionnaire answers.",
           };
       }
-    } else {
+    } else if (message) {
       // Natural language processing - detect intent
       const intent = detectIntent(message);
       
@@ -138,7 +152,7 @@ export async function POST(request: NextRequest) {
         const result = await performGapAnalysis(intent.frameworkKey || "SOC2");
         addPendingApproval("gap_analysis", result);
 
-        await createAuditLog(ORG_ID, {
+        await createAuditLog(ctx.orgId, {
           action: "ai.gap_analysis",
           targetType: "gap_analysis",
           targetId: result.id,
@@ -183,20 +197,24 @@ export async function POST(request: NextRequest) {
           content: generateConversationalResponse(message),
         };
       }
+    } else {
+      return Errors.badRequest("Message or action is required");
     }
 
     const savedMessage = addMessage(session.id, responseMessage);
 
+    logger.info("Copilot chat message processed", {
+      orgId: ctx.orgId,
+      sessionId: session.id,
+      actionType: responseMessage.actionType || "conversation",
+    });
+
     return NextResponse.json({
       message: savedMessage,
-      session: getOrCreateSession(ORG_ID, USER_ID),
+      session: getOrCreateSession(ctx.orgId, ctx.userId),
     });
   } catch (error) {
-    console.error("Chat error:", error);
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Failed to process message" },
-      { status: 500 }
-    );
+    return Errors.internal("Failed to process chat message", error);
   }
 }
 
@@ -232,13 +250,13 @@ function detectIntent(message: string): {
 function formatGapAnalysisResponse(result: Awaited<ReturnType<typeof performGapAnalysis>>): string {
   const { summary, gaps, recommendations } = result;
   
-  let response = `## 📊 Gap Analysis Complete\n\n`;
+  let response = `## Gap Analysis Complete\n\n`;
   response += `**Framework:** ${result.frameworkName}\n`;
   response += `**Coverage:** ${summary.coveragePercent}% (${summary.coveredControls}/${summary.totalControls} controls)\n`;
   response += `**Readiness Score:** ${summary.readinessScore}/100\n\n`;
 
   if (summary.gapCount > 0) {
-    response += `### 🔴 ${summary.gapCount} Gaps Identified\n\n`;
+    response += `### ${summary.gapCount} Gaps Identified\n\n`;
     
     if (summary.criticalGaps > 0) {
       response += `- **Critical:** ${summary.criticalGaps}\n`;
@@ -260,10 +278,10 @@ function formatGapAnalysisResponse(result: Awaited<ReturnType<typeof performGapA
       response += `   ${gap.recommendation}\n\n`;
     });
   } else {
-    response += `✅ **No gaps found!** All controls have approved evidence.\n\n`;
+    response += `**No gaps found!** All controls have approved evidence.\n\n`;
   }
 
-  response += `### 💡 Recommendations\n\n`;
+  response += `### Recommendations\n\n`;
   recommendations.slice(0, 3).forEach((rec) => {
     response += `${rec}\n\n`;
   });
@@ -274,7 +292,7 @@ function formatGapAnalysisResponse(result: Awaited<ReturnType<typeof performGapA
 }
 
 function formatPolicyDraftResponse(result: Awaited<ReturnType<typeof generatePolicyDraft>>): string {
-  let response = `## 📝 Policy Draft Generated\n\n`;
+  let response = `## Policy Draft Generated\n\n`;
   response += `**${result.title}**\n`;
   response += `_Version ${result.version}_\n\n`;
   response += `${result.summary}\n\n`;
@@ -286,7 +304,7 @@ function formatPolicyDraftResponse(result: Awaited<ReturnType<typeof generatePol
   });
 
   if (result.citations.length > 0) {
-    response += `### 📚 Citations (${result.citations.length})\n\n`;
+    response += `### Citations (${result.citations.length})\n\n`;
     result.citations.slice(0, 3).forEach((citation, i) => {
       response += `${i + 1}. ${citation.sourceTitle}`;
       if (citation.excerpt) {
@@ -302,13 +320,13 @@ function formatPolicyDraftResponse(result: Awaited<ReturnType<typeof generatePol
 }
 
 function formatQuestionAnswerResponse(result: Awaited<ReturnType<typeof answerQuestion>>): string {
-  let response = `## 💬 Answer Generated\n\n`;
+  let response = `## Answer Generated\n\n`;
   response += `**Question:** ${result.question}\n\n`;
   response += `**Answer:** ${result.answer}\n\n`;
   response += `**Confidence:** ${Math.round(result.confidence * 100)}%\n\n`;
 
   if (result.citations.length > 0) {
-    response += `### 📚 Supporting Evidence\n\n`;
+    response += `### Supporting Evidence\n\n`;
     result.citations.forEach((citation, i) => {
       response += `${i + 1}. **${citation.sourceTitle}**`;
       if (citation.excerpt) {
@@ -319,7 +337,7 @@ function formatQuestionAnswerResponse(result: Awaited<ReturnType<typeof answerQu
   }
 
   if (result.suggestedEvidence.length > 0) {
-    response += `\n### 📋 Suggested Evidence to Collect\n\n`;
+    response += `\n### Suggested Evidence to Collect\n\n`;
     result.suggestedEvidence.forEach((ev) => {
       response += `- ${ev}\n`;
     });
@@ -334,17 +352,16 @@ function generateConversationalResponse(message: string): string {
   const m = message.toLowerCase();
 
   if (m.includes("hello") || m.includes("hi") || m.includes("hey")) {
-    return `Hello! 👋 How can I help you with your compliance needs today? I can:\n\n• Run a **gap analysis** on your SOC2 or ISO27001 controls\n• Draft **policies** like access control or incident response\n• Answer **questionnaire** questions using your evidence\n\nJust let me know what you'd like to do!`;
+    return `Hello! How can I help you with your compliance needs today? I can:\n\n- Run a **gap analysis** on your SOC2 or ISO27001 controls\n- Draft **policies** like access control or incident response\n- Answer **questionnaire** questions using your evidence\n\nJust let me know what you'd like to do!`;
   }
 
   if (m.includes("help") || m.includes("what can")) {
-    return `I'm your TrustOps AI Copilot! Here's what I can do:\n\n**🔍 Gap Analysis**\nTry: "Analyze my SOC2 gaps" or "What controls am I missing?"\n\n**📝 Policy Drafting**\nTry: "Draft an access control policy" or "Create an incident response policy"\n\n**💬 Questionnaire Answers**\nTry: "How do you handle access control?" or paste any security question\n\nAll AI-generated content requires your approval before being finalized.`;
+    return `I'm your TrustOps AI Copilot! Here's what I can do:\n\n**Gap Analysis**\nTry: "Analyze my SOC2 gaps" or "What controls am I missing?"\n\n**Policy Drafting**\nTry: "Draft an access control policy" or "Create an incident response policy"\n\n**Questionnaire Answers**\nTry: "How do you handle access control?" or paste any security question\n\nAll AI-generated content requires your approval before being finalized.`;
   }
 
   if (m.includes("thank")) {
-    return `You're welcome! 😊 Let me know if you need anything else. I'm here to help with your compliance journey.`;
+    return `You're welcome! Let me know if you need anything else. I'm here to help with your compliance journey.`;
   }
 
-  return `I'm not sure I understand that request. Here are some things I can help with:\n\n• **Gap Analysis**: "Analyze my SOC2 compliance gaps"\n• **Policy Draft**: "Draft a data protection policy"\n• **Questionnaire**: "How do you manage user access?"\n\nWhat would you like to do?`;
+  return `I'm not sure I understand that request. Here are some things I can help with:\n\n- **Gap Analysis**: "Analyze my SOC2 compliance gaps"\n- **Policy Draft**: "Draft a data protection policy"\n- **Questionnaire**: "How do you manage user access?"\n\nWhat would you like to do?`;
 }
-

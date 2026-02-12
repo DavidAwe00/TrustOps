@@ -1,22 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/auth";
-import { isDemo } from "@/lib/demo";
 import { updateEvidenceItem, createAuditLog } from "@/lib/db";
-
-const DEMO_ORG_ID = "demo-org-1";
-
-async function getOrgId(): Promise<string> {
-  if (isDemo()) {
-    return DEMO_ORG_ID;
-  }
-  
-  const session = await auth();
-  if (!session?.user) {
-    throw new Error("Unauthorized");
-  }
-  
-  return (session.user as { defaultOrgId?: string }).defaultOrgId || DEMO_ORG_ID;
-}
+import { requireAuth, Errors } from "@/lib/api-utils";
+import { rateLimit } from "@/lib/rate-limit";
+import { logger } from "@/lib/logger";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -26,33 +12,33 @@ interface RouteParams {
  * POST /api/evidence/[id]/approve - Approve evidence
  */
 export async function POST(request: NextRequest, { params }: RouteParams) {
+  const limited = rateLimit(request, "standard");
+  if (limited) return limited;
+
+  const ctx = await requireAuth();
+  if (ctx instanceof NextResponse) return ctx;
+
   try {
     const { id } = await params;
-    const orgId = await getOrgId();
     
-    const item = await updateEvidenceItem(orgId, id, {
+    const item = await updateEvidenceItem(ctx.orgId, id, {
       reviewStatus: "APPROVED",
     });
     
     if (!item) {
-      return NextResponse.json(
-        { error: "Evidence not found" },
-        { status: 404 }
-      );
+      return Errors.notFound("Evidence");
     }
     
-    await createAuditLog(orgId, {
+    await createAuditLog(ctx.orgId, {
       action: "evidence.approved",
       targetType: "evidence_item",
       targetId: id,
     });
+
+    logger.info("Evidence approved", { orgId: ctx.orgId, evidenceId: id, approvedBy: ctx.userId });
     
     return NextResponse.json({ item });
   } catch (error) {
-    console.error("Error approving evidence:", error);
-    return NextResponse.json(
-      { error: "Failed to approve evidence" },
-      { status: 500 }
-    );
+    return Errors.internal("Failed to approve evidence", error);
   }
 }

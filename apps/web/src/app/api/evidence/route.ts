@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/auth";
 import { isDemo } from "@/lib/demo";
 import {
   getEvidenceItems,
@@ -8,37 +7,26 @@ import {
 } from "@/lib/db";
 import { storeFile } from "@/lib/storage";
 import { addEvidenceFile } from "@/lib/db/demo-provider";
-
-// Demo org ID for unauthenticated demo mode
-const DEMO_ORG_ID = "demo-org-1";
-
-async function getOrgId(): Promise<string> {
-  if (isDemo()) {
-    return DEMO_ORG_ID;
-  }
-  
-  const session = await auth();
-  if (!session?.user) {
-    throw new Error("Unauthorized");
-  }
-  
-  return (session.user as { defaultOrgId?: string }).defaultOrgId || DEMO_ORG_ID;
-}
+import { requireAuth, Errors, validateFiles } from "@/lib/api-utils";
+import { CreateEvidenceSchema, parseBody } from "@/lib/validations";
+import { rateLimit } from "@/lib/rate-limit";
+import { logger } from "@/lib/logger";
 
 /**
  * GET /api/evidence - List all evidence items
  */
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const limited = rateLimit(request, "standard");
+  if (limited) return limited;
+
+  const ctx = await requireAuth();
+  if (ctx instanceof NextResponse) return ctx;
+
   try {
-    const orgId = await getOrgId();
-    const items = await getEvidenceItems(orgId);
+    const items = await getEvidenceItems(ctx.orgId);
     return NextResponse.json({ items });
   } catch (error) {
-    console.error("Error fetching evidence:", error);
-    return NextResponse.json(
-      { error: "Failed to fetch evidence" },
-      { status: 500 }
-    );
+    return Errors.internal("Failed to fetch evidence", error);
   }
 }
 
@@ -46,29 +34,44 @@ export async function GET() {
  * POST /api/evidence - Create a new evidence item with optional file upload
  */
 export async function POST(request: NextRequest) {
+  const limited = rateLimit(request, "upload");
+  if (limited) return limited;
+
+  const ctx = await requireAuth();
+  if (ctx instanceof NextResponse) return ctx;
+
   try {
-    const orgId = await getOrgId();
     const formData = await request.formData();
 
-    const title = formData.get("title") as string;
-    const description = formData.get("description") as string | null;
-    const source = (formData.get("source") as string) || "MANUAL";
-    const controlIds = formData.getAll("controlIds") as string[];
-    const files = formData.getAll("files") as File[];
+    // Validate text fields with Zod
+    const parsed = parseBody(CreateEvidenceSchema, {
+      title: formData.get("title"),
+      description: formData.get("description") || undefined,
+      source: formData.get("source") || "MANUAL",
+      controlIds: formData.getAll("controlIds"),
+    });
 
-    if (!title) {
-      return NextResponse.json(
-        { error: "Title is required" },
-        { status: 400 }
-      );
+    if (!parsed.success) {
+      return Errors.validationError(parsed.errors);
+    }
+
+    const { title, description, source, controlIds } = parsed.data;
+
+    // Validate uploaded files
+    const files = formData.getAll("files") as File[];
+    if (files.length > 0) {
+      const fileValidation = validateFiles(files);
+      if (!fileValidation.valid) {
+        return Errors.badRequest("File validation failed", fileValidation.errors);
+      }
     }
 
     // Create the evidence item
-    const item = await createEvidenceItem(orgId, {
+    const item = await createEvidenceItem(ctx.orgId, {
       title,
-      description: description || undefined,
+      description,
       source: source as "MANUAL" | "GITHUB" | "AWS" | "AI",
-      controlIds: controlIds.length > 0 ? controlIds : undefined,
+      controlIds: controlIds && controlIds.length > 0 ? controlIds : undefined,
     });
 
     // Store uploaded files
@@ -81,7 +84,7 @@ export async function POST(request: NextRequest) {
         if (isDemo()) {
           addEvidenceFile({
             id: stored.id,
-            orgId,
+            orgId: ctx.orgId,
             evidenceItemId: item.id,
             filename: stored.originalName,
             storageKey: stored.filename,
@@ -96,7 +99,7 @@ export async function POST(request: NextRequest) {
         } else {
           const { addEvidenceFile: addPrismaFile } = await import("@/lib/db/prisma-provider");
           await addPrismaFile({
-            orgId,
+            orgId: ctx.orgId,
             evidenceItemId: item.id,
             filename: stored.originalName,
             storageKey: stored.filename,
@@ -111,7 +114,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Add audit log
-    await createAuditLog(orgId, {
+    await createAuditLog(ctx.orgId, {
       action: "evidence.created",
       targetType: "evidence_item",
       targetId: item.id,
@@ -123,15 +126,17 @@ export async function POST(request: NextRequest) {
       },
     });
 
+    logger.info("Evidence created", {
+      orgId: ctx.orgId,
+      evidenceId: item.id,
+      fileCount: storedFiles.length,
+    });
+
     return NextResponse.json({
       item,
       files: storedFiles,
     });
   } catch (error) {
-    console.error("Error creating evidence:", error);
-    return NextResponse.json(
-      { error: "Failed to create evidence" },
-      { status: 500 }
-    );
+    return Errors.internal("Failed to create evidence", error);
   }
 }

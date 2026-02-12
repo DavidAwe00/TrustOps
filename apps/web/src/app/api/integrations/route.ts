@@ -1,30 +1,20 @@
-import { NextResponse } from "next/server";
-import { auth } from "@/auth";
-import { isDemo } from "@/lib/demo";
+import { NextRequest, NextResponse } from "next/server";
 import { getIntegrations } from "@/lib/db";
-
-const DEMO_ORG_ID = "demo-org-1";
-
-async function getOrgId(): Promise<string> {
-  if (isDemo()) {
-    return DEMO_ORG_ID;
-  }
-  
-  const session = await auth();
-  if (!session?.user) {
-    throw new Error("Unauthorized");
-  }
-  
-  return (session.user as { defaultOrgId?: string }).defaultOrgId || DEMO_ORG_ID;
-}
+import { requireAuth, Errors } from "@/lib/api-utils";
+import { rateLimit } from "@/lib/rate-limit";
 
 /**
  * GET /api/integrations - List all integrations
  */
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const limited = rateLimit(request, "standard");
+  if (limited) return limited;
+
+  const ctx = await requireAuth();
+  if (ctx instanceof NextResponse) return ctx;
+
   try {
-    const orgId = await getOrgId();
-    const integrations = await getIntegrations(orgId);
+    const integrations = await getIntegrations(ctx.orgId);
     
     // Remove sensitive config data from response
     const safeIntegrations = integrations.map((i) => ({
@@ -37,10 +27,6 @@ export async function GET() {
     
     return NextResponse.json({ integrations: safeIntegrations });
   } catch (error) {
-    console.error("Error fetching integrations:", error);
-    return NextResponse.json(
-      { error: "Failed to fetch integrations" },
-      { status: 500 }
-    );
+    return Errors.internal("Failed to fetch integrations", error);
   }
 }

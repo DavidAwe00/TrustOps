@@ -53,11 +53,8 @@ export async function POST(request: NextRequest) {
       },
     });
   } catch (error) {
-    console.error("Error generating report:", error);
-    return NextResponse.json(
-      { error: "Failed to generate report" },
-      { status: 500 }
-    );
+    const { Errors } = await import("@/lib/api-utils");
+    return Errors.internal("Failed to generate report", error);
   }
 }
 

@@ -78,11 +78,8 @@ export async function POST(request: NextRequest) {
       message: "Organization created",
     });
   } catch (error) {
-    console.error("Onboarding error:", error);
-    return NextResponse.json(
-      { error: "Failed to complete onboarding" },
-      { status: 500 }
-    );
+    const { Errors } = await import("@/lib/api-utils");
+    return Errors.internal("Failed to complete onboarding", error);
   }
 }
 

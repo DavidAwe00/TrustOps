@@ -1,22 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/auth";
-import { isDemo } from "@/lib/demo";
 import { getIntegration, updateIntegration, createAuditLog } from "@/lib/db";
-
-const DEMO_ORG_ID = "demo-org-1";
-
-async function getOrgId(): Promise<string> {
-  if (isDemo()) {
-    return DEMO_ORG_ID;
-  }
-  
-  const session = await auth();
-  if (!session?.user) {
-    throw new Error("Unauthorized");
-  }
-  
-  return (session.user as { defaultOrgId?: string }).defaultOrgId || DEMO_ORG_ID;
-}
+import { requireAuth, Errors } from "@/lib/api-utils";
+import { ConnectGitHubSchema, ConnectAWSSchema, parseBody } from "@/lib/validations";
+import { encrypt } from "@/lib/encryption";
+import { rateLimit } from "@/lib/rate-limit";
+import { logger } from "@/lib/logger";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -26,62 +14,58 @@ interface RouteParams {
  * POST /api/integrations/[id]/connect - Connect an integration
  */
 export async function POST(request: NextRequest, { params }: RouteParams) {
+  const limited = rateLimit(request, "standard");
+  if (limited) return limited;
+
+  const ctx = await requireAuth();
+  if (ctx instanceof NextResponse) return ctx;
+
   try {
     const { id } = await params;
-    const orgId = await getOrgId();
     const body = await request.json();
     
-    const integration = await getIntegration(orgId, id);
+    const integration = await getIntegration(ctx.orgId, id);
     
     if (!integration) {
-      return NextResponse.json(
-        { error: "Integration not found" },
-        { status: 404 }
-      );
+      return Errors.notFound("Integration");
     }
 
     let config: Record<string, unknown> = {};
 
     switch (integration.provider) {
       case "GITHUB": {
-        if (!body.org) {
-          return NextResponse.json(
-            { error: "GitHub organization is required" },
-            { status: 400 }
-          );
+        const parsed = parseBody(ConnectGitHubSchema, body);
+        if (!parsed.success) {
+          return Errors.validationError(parsed.errors);
         }
         config = {
-          accessToken: body.accessToken,
-          org: body.org,
-          repos: body.repos || [],
+          // Encrypt the access token at rest
+          accessToken: encrypt(parsed.data.accessToken),
+          org: parsed.data.org,
+          repos: parsed.data.repos,
         };
         break;
       }
 
       case "AWS": {
-        if (!body.roleArn) {
-          return NextResponse.json(
-            { error: "AWS Role ARN is required" },
-            { status: 400 }
-          );
+        const parsed = parseBody(ConnectAWSSchema, body);
+        if (!parsed.success) {
+          return Errors.validationError(parsed.errors);
         }
         config = {
-          roleArn: body.roleArn,
-          externalId: body.externalId,
-          region: body.region || "us-east-1",
-          accountId: body.accountId,
+          roleArn: parsed.data.roleArn,
+          externalId: parsed.data.externalId,
+          region: parsed.data.region,
+          accountId: parsed.data.accountId,
         };
         break;
       }
 
       default:
-        return NextResponse.json(
-          { error: "Unknown integration provider" },
-          { status: 400 }
-        );
+        return Errors.badRequest("Unknown integration provider");
     }
 
-    const updated = await updateIntegration(orgId, id, {
+    const updated = await updateIntegration(ctx.orgId, id, {
       status: "CONNECTED",
       config,
       lastSyncAt: new Date(),
@@ -89,17 +73,20 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     });
 
     if (!updated) {
-      return NextResponse.json(
-        { error: "Failed to update integration" },
-        { status: 500 }
-      );
+      return Errors.internal("Failed to update integration");
     }
 
-    await createAuditLog(orgId, {
+    await createAuditLog(ctx.orgId, {
       action: "integration.connected",
       targetType: "integration",
       targetId: id,
       metadata: { provider: integration.provider },
+    });
+
+    logger.info("Integration connected", {
+      orgId: ctx.orgId,
+      integrationId: id,
+      provider: integration.provider,
     });
 
     // Remove sensitive config from response
@@ -112,10 +99,6 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       integration: { ...updated, config: safeConfig },
     });
   } catch (error) {
-    console.error("Error connecting integration:", error);
-    return NextResponse.json(
-      { error: "Failed to connect integration" },
-      { status: 500 }
-    );
+    return Errors.internal("Failed to connect integration", error);
   }
 }

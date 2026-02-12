@@ -1,7 +1,12 @@
 // This file is used to instrument the Next.js server with Sentry
+// and validate environment variables at startup.
 // https://nextjs.org/docs/app/building-your-application/optimizing/instrumentation
 
 export async function register() {
+  // Validate environment variables early
+  const { assertEnv } = await import("./src/lib/env");
+  assertEnv();
+
   if (process.env.NEXT_RUNTIME === "nodejs") {
     await import("./sentry.server.config");
   }

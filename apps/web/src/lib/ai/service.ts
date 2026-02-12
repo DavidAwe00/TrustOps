@@ -82,7 +82,8 @@ export async function performGapAnalysis(frameworkKey: string): Promise<GapAnaly
         controlEvidenceMap
       );
     } catch (error) {
-      console.error("OpenAI gap analysis failed, falling back to basic:", error);
+      const { logger } = await import("@/lib/logger");
+      logger.error("OpenAI gap analysis failed, falling back to basic", error);
     }
   }
 
@@ -280,7 +281,8 @@ export async function generatePolicyDraft(
     try {
       return await generateAIPolicyDraft(policyType, frameworkKey, approvedEvidence);
     } catch (error) {
-      console.error("OpenAI policy generation failed, falling back to template:", error);
+      const { logger: log } = await import("@/lib/logger");
+      log.error("OpenAI policy generation failed, falling back to template", error);
     }
   }
 
@@ -536,7 +538,8 @@ export async function answerQuestion(
     try {
       return await answerQuestionWithAI(question, context, relevantEvidence);
     } catch (error) {
-      console.error("OpenAI question answering failed, falling back to basic:", error);
+      const { logger: log2 } = await import("@/lib/logger");
+      log2.error("OpenAI question answering failed, falling back to basic", error);
     }
   }
 

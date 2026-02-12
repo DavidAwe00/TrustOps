@@ -4,6 +4,7 @@ import EmailProvider from "next-auth/providers/email";
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import { prisma } from "@trustops/db";
 import { isDemo } from "@/lib/demo";
+import { logger } from "@/lib/logger";
 
 // Demo user for development/demo mode
 const DEMO_USER: User = {
@@ -89,6 +90,44 @@ function getProviders() {
   return providers;
 }
 
+// ---------------------------------------------------------------------------
+// Consolidated: create org + membership for a new user
+// ---------------------------------------------------------------------------
+async function provisionNewUserOrg(userId: string, email: string, name?: string | null) {
+  const orgSlug = email.split("@")[0].toLowerCase().replace(/[^a-z0-9]/g, "-");
+
+  const org = await prisma.org.create({
+    data: {
+      name: `${name || email}'s Organization`,
+      slug: `${orgSlug}-${Date.now()}`,
+    },
+  });
+
+  await prisma.membership.create({
+    data: {
+      userId,
+      orgId: org.id,
+      role: "OWNER",
+    },
+  });
+
+  await prisma.user.update({
+    where: { id: userId },
+    data: { defaultOrgId: org.id },
+  });
+
+  // Create default integrations for new org
+  await prisma.integration.createMany({
+    data: [
+      { orgId: org.id, provider: "GITHUB", name: "GitHub", status: "DISCONNECTED" },
+      { orgId: org.id, provider: "AWS", name: "AWS", status: "DISCONNECTED" },
+    ],
+  });
+
+  logger.info("Provisioned new org for user", { userId, orgId: org.id, orgSlug: org.slug });
+  return org;
+}
+
 // Auth options for NextAuth v4
 export const authOptions: NextAuthOptions = {
   // Use Prisma adapter only in production
@@ -151,7 +190,7 @@ export const authOptions: NextAuthOptions = {
     },
     
     async signIn({ user, account }) {
-      // In production, create org and membership for new users
+      // In production, ensure user has an org
       if (!isDemo() && account?.provider === "email" && user.email) {
         const existingUser = await prisma.user.findUnique({
           where: { email: user.email },
@@ -160,35 +199,7 @@ export const authOptions: NextAuthOptions = {
         
         // If user exists but has no org, create one
         if (existingUser && existingUser.memberships.length === 0) {
-          const orgSlug = user.email.split("@")[0].toLowerCase().replace(/[^a-z0-9]/g, "-");
-          
-          const org = await prisma.org.create({
-            data: {
-              name: `${user.name || user.email}'s Organization`,
-              slug: `${orgSlug}-${Date.now()}`,
-            },
-          });
-          
-          await prisma.membership.create({
-            data: {
-              userId: existingUser.id,
-              orgId: org.id,
-              role: "OWNER",
-            },
-          });
-          
-          await prisma.user.update({
-            where: { id: existingUser.id },
-            data: { defaultOrgId: org.id },
-          });
-          
-          // Create default integrations for new org
-          await prisma.integration.createMany({
-            data: [
-              { orgId: org.id, provider: "GITHUB", name: "GitHub", status: "DISCONNECTED" },
-              { orgId: org.id, provider: "AWS", name: "AWS", status: "DISCONNECTED" },
-            ],
-          });
+          await provisionNewUserOrg(existingUser.id, user.email, user.name);
         }
       }
       
@@ -200,40 +211,23 @@ export const authOptions: NextAuthOptions = {
     async createUser({ user }) {
       // Create org and membership for new users
       if (!isDemo() && user.email) {
-        const orgSlug = user.email.split("@")[0].toLowerCase().replace(/[^a-z0-9]/g, "-");
-        
-        const org = await prisma.org.create({
-          data: {
-            name: `${user.name || user.email}'s Organization`,
-            slug: `${orgSlug}-${Date.now()}`,
-          },
-        });
-        
-        await prisma.membership.create({
-          data: {
-            userId: user.id,
-            orgId: org.id,
-            role: "OWNER",
-          },
-        });
-        
-        await prisma.user.update({
-          where: { id: user.id },
-          data: { defaultOrgId: org.id },
-        });
-        
-        // Create default integrations
-        await prisma.integration.createMany({
-          data: [
-            { orgId: org.id, provider: "GITHUB", name: "GitHub", status: "DISCONNECTED" },
-            { orgId: org.id, provider: "AWS", name: "AWS", status: "DISCONNECTED" },
-          ],
-        });
+        await provisionNewUserOrg(user.id, user.email, user.name);
       }
     },
   },
   
-  secret: process.env.AUTH_SECRET || "development-secret-change-in-production",
+  // SECURITY: No fallback secret. AUTH_SECRET must be explicitly set.
+  secret: (() => {
+    const secret = process.env.AUTH_SECRET;
+    if (!secret && process.env.NODE_ENV === "production") {
+      throw new Error(
+        "[TrustOps] AUTH_SECRET environment variable is required in production. " +
+        "Generate one with: openssl rand -base64 32"
+      );
+    }
+    // Allow a dev fallback only in non-production
+    return secret || "dev-only-secret-do-not-use-in-production";
+  })(),
   
   debug: process.env.NODE_ENV === "development",
 };

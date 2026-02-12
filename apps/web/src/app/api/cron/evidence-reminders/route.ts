@@ -10,46 +10,23 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { sendExpiryReminder } from "@/lib/email";
-
-// Demo data - in production, fetch from database
-const demoExpiringEvidence = [
-  {
-    id: "ev-1",
-    title: "AWS Config Backup Policy",
-    expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
-    ownerId: "user-1",
-    ownerEmail: "admin@example.com",
-  },
-  {
-    id: "ev-2",
-    title: "Security Training Certificates",
-    expiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000), // 14 days
-    ownerId: "user-1",
-    ownerEmail: "admin@example.com",
-  },
-  {
-    id: "ev-3",
-    title: "Vendor Risk Assessment",
-    expiresAt: new Date(Date.now() + 21 * 24 * 60 * 60 * 1000), // 21 days
-    ownerId: "user-2",
-    ownerEmail: "compliance@example.com",
-  },
-  {
-    id: "ev-4",
-    title: "Penetration Test Report",
-    expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
-    ownerId: "user-1",
-    ownerEmail: "admin@example.com",
-  },
-];
+import { isDemo } from "@/lib/demo";
+import { Errors } from "@/lib/api-utils";
+import { rateLimit } from "@/lib/rate-limit";
+import { logger } from "@/lib/logger";
 
 // Verify cron secret to prevent unauthorized access
 function verifyCronSecret(request: NextRequest): boolean {
   const authHeader = request.headers.get("authorization");
   const cronSecret = process.env.CRON_SECRET;
 
-  // If no secret is set, allow in development
-  if (!cronSecret && process.env.NODE_ENV === "development") {
+  // In production, CRON_SECRET is strictly required
+  if (!cronSecret) {
+    if (process.env.NODE_ENV === "production") {
+      logger.error("CRON_SECRET is not set — rejecting cron request in production");
+      return false;
+    }
+    // Allow in development only
     return true;
   }
 
@@ -57,9 +34,12 @@ function verifyCronSecret(request: NextRequest): boolean {
 }
 
 export async function POST(request: NextRequest) {
+  const limited = rateLimit(request, "cron");
+  if (limited) return limited;
+
   // Verify authorization
   if (!verifyCronSecret(request)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return Errors.unauthorized("Invalid or missing cron secret");
   }
 
   try {
@@ -67,21 +47,55 @@ export async function POST(request: NextRequest) {
     const thirtyDaysFromNow = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
 
     // In production, query database for expiring evidence
-    // const expiringEvidence = await prisma.evidenceItem.findMany({
-    //   where: {
-    //     expiresAt: {
-    //       gte: now,
-    //       lte: thirtyDaysFromNow,
-    //     },
-    //     reminderSent: false,
-    //   },
-    //   include: { owner: true },
-    // });
+    let expiringEvidence: Array<{
+      id: string;
+      title: string;
+      expiresAt: Date;
+      ownerEmail: string;
+    }>;
 
-    // For demo, use sample data
-    const expiringEvidence = demoExpiringEvidence.filter(
-      (e) => e.expiresAt >= now && e.expiresAt <= thirtyDaysFromNow
-    );
+    if (!isDemo() && process.env.DATABASE_URL) {
+      const { prisma } = await import("@trustops/db");
+      // Fetch evidence items expiring within the next 30 days
+      const items = await prisma.evidenceItem.findMany({
+        where: {
+          expiresAt: {
+            gte: now,
+            lte: thirtyDaysFromNow,
+          },
+        },
+        include: {
+          org: {
+            include: {
+              memberships: {
+                where: { role: "OWNER" },
+                include: { user: true },
+                take: 1,
+              },
+            },
+          },
+        },
+      });
+
+      expiringEvidence = items
+        .filter((item) => item.org.memberships[0]?.user?.email)
+        .map((item) => ({
+          id: item.id,
+          title: item.title,
+          expiresAt: item.expiresAt!,
+          ownerEmail: item.org.memberships[0].user.email!,
+        }));
+    } else {
+      // Demo fallback — no hardcoded emails, just skip
+      logger.info("Cron: demo mode or no DATABASE_URL, returning empty results");
+      return NextResponse.json({
+        success: true,
+        processed: 0,
+        emailsSent: 0,
+        results: [],
+        message: "No database configured — skipping evidence reminder check",
+      });
+    }
 
     // Group by owner email
     const byOwner = new Map<
@@ -105,7 +119,7 @@ export async function POST(request: NextRequest) {
       try {
         // Skip if email server not configured
         if (!process.env.EMAIL_SERVER) {
-          console.log(`[DRY RUN] Would send reminder to ${email} for ${items.length} items`);
+          logger.info("Cron: email not configured, skipping reminder", { email, itemCount: items.length });
           results.push({ email, sent: false, error: "Email not configured" });
           continue;
         }
@@ -113,13 +127,9 @@ export async function POST(request: NextRequest) {
         await sendExpiryReminder(email, items);
         results.push({ email, sent: true });
 
-        // In production, mark as reminded
-        // await prisma.evidenceItem.updateMany({
-        //   where: { ownerEmail: email, id: { in: items.map(i => i.id) } },
-        //   data: { reminderSent: true, reminderSentAt: now },
-        // });
+        logger.info("Evidence expiry reminder sent", { email, itemCount: items.length });
       } catch (error) {
-        console.error(`Failed to send reminder to ${email}:`, error);
+        logger.error("Failed to send evidence reminder", error, { email });
         results.push({
           email,
           sent: false,
@@ -135,11 +145,7 @@ export async function POST(request: NextRequest) {
       results,
     });
   } catch (error) {
-    console.error("Evidence reminder cron error:", error);
-    return NextResponse.json(
-      { error: "Failed to process evidence reminders" },
-      { status: 500 }
-    );
+    return Errors.internal("Evidence reminder cron error", error);
   }
 }
 
@@ -147,12 +153,3 @@ export async function POST(request: NextRequest) {
 export async function GET(request: NextRequest) {
   return POST(request);
 }
-
-
-
-
-
-
-
-
-

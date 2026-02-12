@@ -36,7 +36,9 @@ export function isSlackConfigured(): boolean {
  */
 export async function sendSlackMessage(message: SlackMessage): Promise<boolean> {
   if (!SLACK_WEBHOOK_URL) {
-    console.log("[Slack] Webhook not configured, skipping notification");
+    // Dynamically import to avoid circular deps at module load
+    const { logger } = await import("@/lib/logger");
+    logger.debug("Slack webhook not configured, skipping notification");
     return false;
   }
 
@@ -48,13 +50,15 @@ export async function sendSlackMessage(message: SlackMessage): Promise<boolean> 
     });
 
     if (!response.ok) {
-      console.error("[Slack] Failed to send message:", response.statusText);
+      const { logger } = await import("@/lib/logger");
+      logger.error("Slack message delivery failed", undefined, { status: response.statusText });
       return false;
     }
 
     return true;
   } catch (error) {
-    console.error("[Slack] Error sending message:", error);
+    const { logger } = await import("@/lib/logger");
+    logger.error("Slack message send error", error);
     return false;
   }
 }

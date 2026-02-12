@@ -53,11 +53,8 @@ export async function POST(request: NextRequest) {
       message: "Verification email sent",
     });
   } catch (error) {
-    console.error("Signup error:", error);
-    return NextResponse.json(
-      { error: "Failed to create account" },
-      { status: 500 }
-    );
+    const { Errors } = await import("@/lib/api-utils");
+    return Errors.internal("Failed to create account", error);
   }
 }
 

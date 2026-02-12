@@ -1,24 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/auth";
-import { isDemo } from "@/lib/demo";
 import { getIntegration, updateIntegration, createAuditLog } from "@/lib/db";
 import { runGitHubCollector } from "@/lib/collectors/github-collector";
 import { runAWSCollector } from "@/lib/collectors/aws-collector";
-
-const DEMO_ORG_ID = "demo-org-1";
-
-async function getOrgId(): Promise<string> {
-  if (isDemo()) {
-    return DEMO_ORG_ID;
-  }
-  
-  const session = await auth();
-  if (!session?.user) {
-    throw new Error("Unauthorized");
-  }
-  
-  return (session.user as { defaultOrgId?: string }).defaultOrgId || DEMO_ORG_ID;
-}
+import { requireAuth, Errors } from "@/lib/api-utils";
+import { rateLimit } from "@/lib/rate-limit";
+import { logger } from "@/lib/logger";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -28,27 +14,26 @@ interface RouteParams {
  * POST /api/integrations/[id]/sync - Run collector for an integration
  */
 export async function POST(request: NextRequest, { params }: RouteParams) {
+  const limited = rateLimit(request, "ai");
+  if (limited) return limited;
+
+  const ctx = await requireAuth();
+  if (ctx instanceof NextResponse) return ctx;
+
   try {
     const { id } = await params;
-    const orgId = await getOrgId();
 
-    const integration = await getIntegration(orgId, id);
+    const integration = await getIntegration(ctx.orgId, id);
     if (!integration) {
-      return NextResponse.json(
-        { error: "Integration not found" },
-        { status: 404 }
-      );
+      return Errors.notFound("Integration");
     }
 
     if (integration.status === "DISCONNECTED") {
-      return NextResponse.json(
-        { error: "Integration is not connected" },
-        { status: 400 }
-      );
+      return Errors.badRequest("Integration is not connected");
     }
 
     // Mark as syncing
-    await updateIntegration(orgId, id, {
+    await updateIntegration(ctx.orgId, id, {
       lastSyncAt: new Date(),
       lastError: null,
     });
@@ -65,21 +50,18 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
         break;
 
       default:
-        return NextResponse.json(
-          { error: "Unknown integration provider" },
-          { status: 400 }
-        );
+        return Errors.badRequest("Unknown integration provider");
     }
 
     // Update integration with sync result
     if (!result.success) {
-      await updateIntegration(orgId, id, {
+      await updateIntegration(ctx.orgId, id, {
         status: "ERROR",
         lastError: result.errors?.join(", ") || "Sync failed",
       });
     }
 
-    await createAuditLog(orgId, {
+    await createAuditLog(ctx.orgId, {
       action: "integration.synced",
       targetType: "integration",
       targetId: id,
@@ -90,6 +72,14 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       },
     });
 
+    logger.info("Integration sync completed", {
+      orgId: ctx.orgId,
+      integrationId: id,
+      provider: integration.provider,
+      success: result.success,
+      evidenceCreated: result.evidenceCreated,
+    });
+
     return NextResponse.json({
       success: result.success,
       evidenceCreated: result.evidenceCreated,
@@ -97,10 +87,6 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       duration: result.duration,
     });
   } catch (error) {
-    console.error("Sync error:", error);
-    return NextResponse.json(
-      { error: "Sync failed" },
-      { status: 500 }
-    );
+    return Errors.internal("Integration sync failed", error);
   }
 }

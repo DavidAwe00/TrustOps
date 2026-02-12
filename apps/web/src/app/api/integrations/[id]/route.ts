@@ -1,22 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/auth";
-import { isDemo } from "@/lib/demo";
 import { getIntegration, updateIntegration, createAuditLog } from "@/lib/db";
-
-const DEMO_ORG_ID = "demo-org-1";
-
-async function getOrgId(): Promise<string> {
-  if (isDemo()) {
-    return DEMO_ORG_ID;
-  }
-  
-  const session = await auth();
-  if (!session?.user) {
-    throw new Error("Unauthorized");
-  }
-  
-  return (session.user as { defaultOrgId?: string }).defaultOrgId || DEMO_ORG_ID;
-}
+import { requireAuth, Errors } from "@/lib/api-utils";
+import { rateLimit } from "@/lib/rate-limit";
+import { logger } from "@/lib/logger";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -26,17 +12,18 @@ interface RouteParams {
  * GET /api/integrations/[id] - Get a single integration
  */
 export async function GET(request: NextRequest, { params }: RouteParams) {
+  const limited = rateLimit(request, "standard");
+  if (limited) return limited;
+
+  const ctx = await requireAuth();
+  if (ctx instanceof NextResponse) return ctx;
+
   try {
     const { id } = await params;
-    const orgId = await getOrgId();
-    
-    const integration = await getIntegration(orgId, id);
+    const integration = await getIntegration(ctx.orgId, id);
     
     if (!integration) {
-      return NextResponse.json(
-        { error: "Integration not found" },
-        { status: 404 }
-      );
+      return Errors.notFound("Integration");
     }
     
     // Remove sensitive config
@@ -50,11 +37,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     
     return NextResponse.json({ integration: safeIntegration });
   } catch (error) {
-    console.error("Error fetching integration:", error);
-    return NextResponse.json(
-      { error: "Failed to fetch integration" },
-      { status: 500 }
-    );
+    return Errors.internal("Failed to fetch integration", error);
   }
 }
 
@@ -62,33 +45,33 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
  * PATCH /api/integrations/[id] - Update an integration
  */
 export async function PATCH(request: NextRequest, { params }: RouteParams) {
+  const limited = rateLimit(request, "standard");
+  if (limited) return limited;
+
+  const ctx = await requireAuth();
+  if (ctx instanceof NextResponse) return ctx;
+
   try {
     const { id } = await params;
-    const orgId = await getOrgId();
     const body = await request.json();
     
-    const integration = await updateIntegration(orgId, id, body);
+    const integration = await updateIntegration(ctx.orgId, id, body);
     
     if (!integration) {
-      return NextResponse.json(
-        { error: "Integration not found" },
-        { status: 404 }
-      );
+      return Errors.notFound("Integration");
     }
     
-    await createAuditLog(orgId, {
+    await createAuditLog(ctx.orgId, {
       action: "integration.updated",
       targetType: "integration",
       targetId: id,
     });
+
+    logger.info("Integration updated", { orgId: ctx.orgId, integrationId: id });
     
     return NextResponse.json({ integration });
   } catch (error) {
-    console.error("Error updating integration:", error);
-    return NextResponse.json(
-      { error: "Failed to update integration" },
-      { status: 500 }
-    );
+    return Errors.internal("Failed to update integration", error);
   }
 }
 
@@ -96,35 +79,35 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
  * DELETE /api/integrations/[id] - Disconnect an integration
  */
 export async function DELETE(request: NextRequest, { params }: RouteParams) {
+  const limited = rateLimit(request, "standard");
+  if (limited) return limited;
+
+  const ctx = await requireAuth();
+  if (ctx instanceof NextResponse) return ctx;
+
   try {
     const { id } = await params;
-    const orgId = await getOrgId();
     
-    const integration = await updateIntegration(orgId, id, {
+    const integration = await updateIntegration(ctx.orgId, id, {
       status: "DISCONNECTED",
       config: {},
       lastError: null,
     });
     
     if (!integration) {
-      return NextResponse.json(
-        { error: "Integration not found" },
-        { status: 404 }
-      );
+      return Errors.notFound("Integration");
     }
     
-    await createAuditLog(orgId, {
+    await createAuditLog(ctx.orgId, {
       action: "integration.disconnected",
       targetType: "integration",
       targetId: id,
     });
+
+    logger.info("Integration disconnected", { orgId: ctx.orgId, integrationId: id });
     
     return NextResponse.json({ success: true });
   } catch (error) {
-    console.error("Error disconnecting integration:", error);
-    return NextResponse.json(
-      { error: "Failed to disconnect integration" },
-      { status: 500 }
-    );
+    return Errors.internal("Failed to disconnect integration", error);
   }
 }

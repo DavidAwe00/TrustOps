@@ -1,37 +1,22 @@
-import { NextResponse } from "next/server";
-import { auth } from "@/auth";
-import { isDemo } from "@/lib/demo";
+import { NextRequest, NextResponse } from "next/server";
 import { getCoverageStats } from "@/lib/db";
-
-// Demo org ID for unauthenticated demo mode
-const DEMO_ORG_ID = "demo-org-1";
-
-async function getOrgId(): Promise<string> {
-  if (isDemo()) {
-    return DEMO_ORG_ID;
-  }
-  
-  const session = await auth();
-  if (!session?.user) {
-    throw new Error("Unauthorized");
-  }
-  
-  return (session.user as { defaultOrgId?: string }).defaultOrgId || DEMO_ORG_ID;
-}
+import { requireAuth, Errors } from "@/lib/api-utils";
+import { rateLimit } from "@/lib/rate-limit";
 
 /**
  * GET /api/dashboard/stats - Get dashboard statistics
  */
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const limited = rateLimit(request, "standard");
+  if (limited) return limited;
+
+  const ctx = await requireAuth();
+  if (ctx instanceof NextResponse) return ctx;
+
   try {
-    const orgId = await getOrgId();
-    const stats = await getCoverageStats(orgId);
+    const stats = await getCoverageStats(ctx.orgId);
     return NextResponse.json(stats);
   } catch (error) {
-    console.error("Error fetching dashboard stats:", error);
-    return NextResponse.json(
-      { error: "Failed to fetch dashboard stats" },
-      { status: 500 }
-    );
+    return Errors.internal("Failed to fetch dashboard stats", error);
   }
 }

@@ -1,22 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/auth";
-import { isDemo } from "@/lib/demo";
 import { updateEvidenceItem, createAuditLog } from "@/lib/db";
-
-const DEMO_ORG_ID = "demo-org-1";
-
-async function getOrgId(): Promise<string> {
-  if (isDemo()) {
-    return DEMO_ORG_ID;
-  }
-  
-  const session = await auth();
-  if (!session?.user) {
-    throw new Error("Unauthorized");
-  }
-  
-  return (session.user as { defaultOrgId?: string }).defaultOrgId || DEMO_ORG_ID;
-}
+import { requireAuth, Errors } from "@/lib/api-utils";
+import { RejectEvidenceSchema, parseBody } from "@/lib/validations";
+import { rateLimit } from "@/lib/rate-limit";
+import { logger } from "@/lib/logger";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -26,35 +13,40 @@ interface RouteParams {
  * POST /api/evidence/[id]/reject - Reject evidence
  */
 export async function POST(request: NextRequest, { params }: RouteParams) {
+  const limited = rateLimit(request, "standard");
+  if (limited) return limited;
+
+  const ctx = await requireAuth();
+  if (ctx instanceof NextResponse) return ctx;
+
   try {
     const { id } = await params;
-    const orgId = await getOrgId();
     const body = await request.json().catch(() => ({}));
+
+    const parsed = parseBody(RejectEvidenceSchema, body);
+    if (!parsed.success) {
+      return Errors.validationError(parsed.errors);
+    }
     
-    const item = await updateEvidenceItem(orgId, id, {
+    const item = await updateEvidenceItem(ctx.orgId, id, {
       reviewStatus: "REJECTED",
     });
     
     if (!item) {
-      return NextResponse.json(
-        { error: "Evidence not found" },
-        { status: 404 }
-      );
+      return Errors.notFound("Evidence");
     }
     
-    await createAuditLog(orgId, {
+    await createAuditLog(ctx.orgId, {
       action: "evidence.rejected",
       targetType: "evidence_item",
       targetId: id,
-      metadata: { reason: body.reason },
+      metadata: { reason: parsed.data.reason },
     });
+
+    logger.info("Evidence rejected", { orgId: ctx.orgId, evidenceId: id, rejectedBy: ctx.userId });
     
     return NextResponse.json({ item });
   } catch (error) {
-    console.error("Error rejecting evidence:", error);
-    return NextResponse.json(
-      { error: "Failed to reject evidence" },
-      { status: 500 }
-    );
+    return Errors.internal("Failed to reject evidence", error);
   }
 }

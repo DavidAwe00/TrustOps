@@ -1,39 +1,30 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isDemo } from "@/lib/demo";
 import { addAuditLog } from "@/lib/demo-store";
-
-const VALID_ROLES = ["ADMIN", "MEMBER", "VIEWER"];
+import { requireAuth, Errors } from "@/lib/api-utils";
+import { InviteTeamMemberSchema, parseBody } from "@/lib/validations";
+import { rateLimit } from "@/lib/rate-limit";
+import { logger } from "@/lib/logger";
 
 /**
  * POST /api/settings/team/invite - Invite a team member
  */
 export async function POST(request: NextRequest) {
+  const limited = rateLimit(request, "auth");
+  if (limited) return limited;
+
+  const ctx = await requireAuth();
+  if (ctx instanceof NextResponse) return ctx;
+
   try {
     const body = await request.json();
-    const { email, role } = body;
 
-    if (!email) {
-      return NextResponse.json(
-        { error: "Email is required" },
-        { status: 400 }
-      );
+    const parsed = parseBody(InviteTeamMemberSchema, body);
+    if (!parsed.success) {
+      return Errors.validationError(parsed.errors);
     }
 
-    // Validate email format
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
-      return NextResponse.json(
-        { error: "Invalid email format" },
-        { status: 400 }
-      );
-    }
-
-    if (role && !VALID_ROLES.includes(role)) {
-      return NextResponse.json(
-        { error: "Invalid role" },
-        { status: 400 }
-      );
-    }
+    const { email, role } = parsed.data;
 
     // Demo mode - just return success
     if (isDemo()) {
@@ -42,7 +33,7 @@ export async function POST(request: NextRequest) {
         "user",
         email,
         "demo@trustops.io",
-        { role: role || "MEMBER" }
+        { role }
       );
 
       return NextResponse.json({
@@ -57,16 +48,13 @@ export async function POST(request: NextRequest) {
     // 3. Send invitation email
     // 4. Add audit log
 
+    logger.info("Team invite sent", { orgId: ctx.orgId, invitedEmail: email, role });
+
     return NextResponse.json({
       success: true,
       message: `Invitation sent to ${email}`,
     });
   } catch (error) {
-    console.error("Error inviting team member:", error);
-    return NextResponse.json(
-      { error: "Failed to send invitation" },
-      { status: 500 }
-    );
+    return Errors.internal("Failed to send invitation", error);
   }
 }
-

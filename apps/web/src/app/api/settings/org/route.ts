@@ -1,10 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isDemo } from "@/lib/demo";
+import { requireAuth, Errors } from "@/lib/api-utils";
+import { UpdateOrgSchema, parseBody } from "@/lib/validations";
+import { rateLimit } from "@/lib/rate-limit";
+import { logger } from "@/lib/logger";
 
 /**
  * GET /api/settings/org - Get organization settings
  */
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const limited = rateLimit(request, "standard");
+  if (limited) return limited;
+
+  const ctx = await requireAuth();
+  if (ctx instanceof NextResponse) return ctx;
+
   // Demo mode returns mock data
   if (isDemo()) {
     return NextResponse.json({
@@ -18,7 +28,7 @@ export async function GET() {
 
   // TODO: Implement with Prisma
   return NextResponse.json({
-    error: "Not implemented",
+    error: { code: "NOT_IMPLEMENTED", message: "Not implemented" },
   }, { status: 501 });
 }
 
@@ -26,25 +36,21 @@ export async function GET() {
  * PUT /api/settings/org - Update organization settings
  */
 export async function PUT(request: NextRequest) {
+  const limited = rateLimit(request, "standard");
+  if (limited) return limited;
+
+  const ctx = await requireAuth();
+  if (ctx instanceof NextResponse) return ctx;
+
   try {
     const body = await request.json();
-    const { name, slug } = body;
 
-    if (!name || !slug) {
-      return NextResponse.json(
-        { error: "Name and slug are required" },
-        { status: 400 }
-      );
+    const parsed = parseBody(UpdateOrgSchema, body);
+    if (!parsed.success) {
+      return Errors.validationError(parsed.errors);
     }
 
-    // Validate slug format
-    const slugRegex = /^[a-z0-9-]+$/;
-    if (!slugRegex.test(slug)) {
-      return NextResponse.json(
-        { error: "Slug must contain only lowercase letters, numbers, and hyphens" },
-        { status: 400 }
-      );
-    }
+    const { name, slug } = parsed.data;
 
     // Demo mode - just return success
     if (isDemo()) {
@@ -60,15 +66,12 @@ export async function PUT(request: NextRequest) {
     //   data: { name, slug },
     // });
 
+    logger.info("Org settings updated", { orgId: ctx.orgId, name, slug });
+
     return NextResponse.json({
       success: true,
     });
   } catch (error) {
-    console.error("Error updating org settings:", error);
-    return NextResponse.json(
-      { error: "Failed to update organization settings" },
-      { status: 500 }
-    );
+    return Errors.internal("Failed to update organization settings", error);
   }
 }
-

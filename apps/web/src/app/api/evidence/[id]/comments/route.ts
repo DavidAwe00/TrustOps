@@ -1,22 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/auth";
-import { isDemo } from "@/lib/demo";
 import { createAuditLog } from "@/lib/db";
-
-const DEMO_ORG_ID = "demo-org-1";
-
-async function getOrgId(): Promise<string> {
-  if (isDemo()) {
-    return DEMO_ORG_ID;
-  }
-  
-  const session = await auth();
-  if (!session?.user) {
-    throw new Error("Unauthorized");
-  }
-  
-  return (session.user as { defaultOrgId?: string }).defaultOrgId || DEMO_ORG_ID;
-}
+import { requireAuth, Errors } from "@/lib/api-utils";
+import { CreateCommentSchema, parseBody } from "@/lib/validations";
+import { rateLimit } from "@/lib/rate-limit";
+import { logger } from "@/lib/logger";
 
 // In-memory comments store for demo mode
 const commentsStore: Map<string, Array<{
@@ -36,18 +23,18 @@ interface RouteParams {
  * GET /api/evidence/[id]/comments - Get comments for evidence
  */
 export async function GET(request: NextRequest, { params }: RouteParams) {
+  const limited = rateLimit(request, "standard");
+  if (limited) return limited;
+
+  const ctx = await requireAuth();
+  if (ctx instanceof NextResponse) return ctx;
+
   try {
     const { id } = await params;
-    
     const comments = commentsStore.get(id) || [];
-    
     return NextResponse.json({ comments });
   } catch (error) {
-    console.error("Error fetching comments:", error);
-    return NextResponse.json(
-      { error: "Failed to fetch comments" },
-      { status: 500 }
-    );
+    return Errors.internal("Failed to fetch comments", error);
   }
 }
 
@@ -55,24 +42,27 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
  * POST /api/evidence/[id]/comments - Add a comment to evidence
  */
 export async function POST(request: NextRequest, { params }: RouteParams) {
+  const limited = rateLimit(request, "standard");
+  if (limited) return limited;
+
+  const ctx = await requireAuth();
+  if (ctx instanceof NextResponse) return ctx;
+
   try {
     const { id } = await params;
-    const orgId = await getOrgId();
     const body = await request.json();
-    
-    if (!body.content) {
-      return NextResponse.json(
-        { error: "Comment content is required" },
-        { status: 400 }
-      );
+
+    const parsed = parseBody(CreateCommentSchema, body);
+    if (!parsed.success) {
+      return Errors.validationError(parsed.errors);
     }
     
     const comment = {
       id: crypto.randomUUID(),
       evidenceItemId: id,
-      userId: "demo-user-1",
-      userName: "Demo User",
-      content: body.content,
+      userId: ctx.userId,
+      userName: ctx.email,
+      content: parsed.data.content,
       createdAt: new Date().toISOString(),
     };
     
@@ -80,19 +70,17 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     existing.push(comment);
     commentsStore.set(id, existing);
     
-    await createAuditLog(orgId, {
+    await createAuditLog(ctx.orgId, {
       action: "comment.created",
       targetType: "evidence_item",
       targetId: id,
       metadata: { commentId: comment.id },
     });
+
+    logger.info("Comment created", { orgId: ctx.orgId, evidenceId: id, commentId: comment.id });
     
     return NextResponse.json({ comment });
   } catch (error) {
-    console.error("Error adding comment:", error);
-    return NextResponse.json(
-      { error: "Failed to add comment" },
-      { status: 500 }
-    );
+    return Errors.internal("Failed to add comment", error);
   }
 }

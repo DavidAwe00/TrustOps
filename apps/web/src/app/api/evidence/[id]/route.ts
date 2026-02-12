@@ -1,27 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/auth";
-import { isDemo } from "@/lib/demo";
 import {
   getEvidenceItem,
   updateEvidenceItem,
   deleteEvidenceItem,
   createAuditLog,
 } from "@/lib/db";
-
-const DEMO_ORG_ID = "demo-org-1";
-
-async function getOrgId(): Promise<string> {
-  if (isDemo()) {
-    return DEMO_ORG_ID;
-  }
-  
-  const session = await auth();
-  if (!session?.user) {
-    throw new Error("Unauthorized");
-  }
-  
-  return (session.user as { defaultOrgId?: string }).defaultOrgId || DEMO_ORG_ID;
-}
+import { requireAuth, Errors } from "@/lib/api-utils";
+import { UpdateEvidenceSchema, parseBody } from "@/lib/validations";
+import { rateLimit } from "@/lib/rate-limit";
+import { logger } from "@/lib/logger";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -31,26 +18,23 @@ interface RouteParams {
  * GET /api/evidence/[id] - Get a single evidence item
  */
 export async function GET(request: NextRequest, { params }: RouteParams) {
+  const limited = rateLimit(request, "standard");
+  if (limited) return limited;
+
+  const ctx = await requireAuth();
+  if (ctx instanceof NextResponse) return ctx;
+
   try {
     const { id } = await params;
-    const orgId = await getOrgId();
-    
-    const item = await getEvidenceItem(orgId, id);
+    const item = await getEvidenceItem(ctx.orgId, id);
     
     if (!item) {
-      return NextResponse.json(
-        { error: "Evidence not found" },
-        { status: 404 }
-      );
+      return Errors.notFound("Evidence");
     }
     
     return NextResponse.json({ item });
   } catch (error) {
-    console.error("Error fetching evidence:", error);
-    return NextResponse.json(
-      { error: "Failed to fetch evidence" },
-      { status: 500 }
-    );
+    return Errors.internal("Failed to fetch evidence", error);
   }
 }
 
@@ -58,34 +42,39 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
  * PATCH /api/evidence/[id] - Update an evidence item
  */
 export async function PATCH(request: NextRequest, { params }: RouteParams) {
+  const limited = rateLimit(request, "standard");
+  if (limited) return limited;
+
+  const ctx = await requireAuth();
+  if (ctx instanceof NextResponse) return ctx;
+
   try {
     const { id } = await params;
-    const orgId = await getOrgId();
     const body = await request.json();
-    
-    const item = await updateEvidenceItem(orgId, id, body);
-    
-    if (!item) {
-      return NextResponse.json(
-        { error: "Evidence not found" },
-        { status: 404 }
-      );
+
+    const parsed = parseBody(UpdateEvidenceSchema, body);
+    if (!parsed.success) {
+      return Errors.validationError(parsed.errors);
     }
     
-    await createAuditLog(orgId, {
+    const item = await updateEvidenceItem(ctx.orgId, id, parsed.data);
+    
+    if (!item) {
+      return Errors.notFound("Evidence");
+    }
+    
+    await createAuditLog(ctx.orgId, {
       action: "evidence.updated",
       targetType: "evidence_item",
       targetId: id,
-      metadata: { updates: body },
+      metadata: { updates: parsed.data },
     });
+
+    logger.info("Evidence updated", { orgId: ctx.orgId, evidenceId: id });
     
     return NextResponse.json({ item });
   } catch (error) {
-    console.error("Error updating evidence:", error);
-    return NextResponse.json(
-      { error: "Failed to update evidence" },
-      { status: 500 }
-    );
+    return Errors.internal("Failed to update evidence", error);
   }
 }
 
@@ -93,31 +82,30 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
  * DELETE /api/evidence/[id] - Delete an evidence item
  */
 export async function DELETE(request: NextRequest, { params }: RouteParams) {
+  const limited = rateLimit(request, "standard");
+  if (limited) return limited;
+
+  const ctx = await requireAuth();
+  if (ctx instanceof NextResponse) return ctx;
+
   try {
     const { id } = await params;
-    const orgId = await getOrgId();
-    
-    const success = await deleteEvidenceItem(orgId, id);
+    const success = await deleteEvidenceItem(ctx.orgId, id);
     
     if (!success) {
-      return NextResponse.json(
-        { error: "Evidence not found" },
-        { status: 404 }
-      );
+      return Errors.notFound("Evidence");
     }
     
-    await createAuditLog(orgId, {
+    await createAuditLog(ctx.orgId, {
       action: "evidence.deleted",
       targetType: "evidence_item",
       targetId: id,
     });
+
+    logger.info("Evidence deleted", { orgId: ctx.orgId, evidenceId: id });
     
     return NextResponse.json({ success: true });
   } catch (error) {
-    console.error("Error deleting evidence:", error);
-    return NextResponse.json(
-      { error: "Failed to delete evidence" },
-      { status: 500 }
-    );
+    return Errors.internal("Failed to delete evidence", error);
   }
 }
